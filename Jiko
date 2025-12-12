@@ -1,0 +1,464 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="tanganyika-fullstack"
+echo "Creating project in ./\$PROJECT_DIR ..."
+rm -rf "$PROJECT_DIR"
+mkdir -p "$PROJECT_DIR"/{server,client/src}
+
+########################
+# SERVER: package.json
+########################
+cat > "$PROJECT_DIR/server/package.json" <<'JSON'
+{
+  "name": "tanganyika-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "sqlite3": "^5.1.6",
+    "body-parser": "^1.20.2"
+  }
+}
+JSON
+
+########################
+# SERVER: server.js
+# (Express + SQLite, seeds sample data, bookings endpoint)
+########################
+cat > "$PROJECT_DIR/server/server.js" <<'JS'
+/**
+ * Tanganyika Server - Express + SQLite (ESM)
+ * Run:
+ *   cd server
+ *   npm install
+ *   npm start
+ */
+import express from 'express';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import sqlite3 from 'sqlite3';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const dbPath = path.join(__dirname, 'data.db');
+
+const sqlite = sqlite3.verbose();
+const db = new sqlite.Database(dbPath);
+
+function initDb() {
+  db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS destinations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, description TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS transports (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, name TEXT, route TEXT, price REAL)`);
+    db.run(`CREATE TABLE IF NOT EXISTS operators (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, phone TEXT, email TEXT, fee REAL)`);
+    db.run(`CREATE TABLE IF NOT EXISTS bookings (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, destination TEXT, transport TEXT, days INTEGER, travelers INTEGER, type TEXT, insurance INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
+  });
+}
+
+function seedData() {
+  db.serialize(() => {
+    db.run("DELETE FROM destinations");
+    db.run("DELETE FROM transports");
+    db.run("DELETE FROM operators");
+
+    db.run("INSERT INTO destinations (name, description) VALUES (?,?)", ['Serengeti','Witness the Great Migration and incredible wildlife.']);
+    db.run("INSERT INTO destinations (name, description) VALUES (?,?)", ['Zanzibar','Relax on white sandy beaches and explore Stone Town.']);
+
+    db.run("INSERT INTO transports (type,name,route,price) VALUES (?,?,?,?)", ['Flight','Air Tanzania','Dar es Salaam → Zanzibar',120]);
+    db.run("INSERT INTO transports (type,name,route,price) VALUES (?,?,?,?)", ['Bus','Dar Express','Dar es Salaam → Arusha',25]);
+    db.run("INSERT INTO transports (type,name,route,price) VALUES (?,?,?,?)", ['Train','TAZARA','Dar es Salaam → Mwanza',50]);
+
+    db.run("INSERT INTO operators (name,phone,email,fee) VALUES (?,?,?,?)", ['Safari Tours Ltd','+255712345678','info@safaritours.co.tz',50]);
+    db.run("INSERT INTO operators (name,phone,email,fee) VALUES (?,?,?,?)", ['Zanzibar Adventures','+255755123456','contact@zanzibaradventures.com',70]);
+  });
+}
+
+initDb();
+seedData();
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+app.get('/api/destinations', (req, res) => {
+  db.all('SELECT * FROM destinations', (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.get('/api/transports', (req, res) => {
+  db.all('SELECT * FROM transports', (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.get('/api/operators', (req, res) => {
+  db.all('SELECT * FROM operators', (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.post('/api/bookings', (req, res) => {
+  const { name, destination, transport, days, travelers, type, insurance } = req.body;
+  const stmt = db.prepare('INSERT INTO bookings (name,destination,transport,days,travelers,type,insurance) VALUES (?,?,?,?,?,?,?)');
+  stmt.run(name, destination, transport, days, travelers, type, insurance ? 1 : 0, function(err) {
+    if (err) return res.status(500).json({ error: err.message });
+    const bookingId = this.lastID;
+    db.get('SELECT price FROM transports WHERE name = ?', [transport], (err, row) => {
+      const transportPrice = row ? row.price : 0;
+      const transportCost = transportPrice * travelers;
+      const insuranceCost = insurance ? 20 * travelers : 0;
+      const total = transportCost + insuranceCost;
+      const activities = [];
+      for (let i=1;i<=days;i++) activities.push(`Day ${i}: Explore ${destination} (suggested activity)`);
+      const itinerary = { id: bookingId, name, destination, transport, days, travelers, type, insurance, insuranceCost, transportCost, total, activities };
+      res.json({ bookingId, itinerary });
+    });
+  });
+});
+
+// Serve client in production build (optional)
+const clientPath = path.join(__dirname, '..', 'client', 'dist');
+app.use(express.static(clientPath));
+app.get('*', (req, res) => {
+  res.sendFile(path.join(clientPath, 'index.html'));
+});
+
+const port = process.env.PORT || 4000;
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
+JS
+
+########################
+# CLIENT: package.json
+########################
+cat > "$PROJECT_DIR/client/package.json" <<'JSON'
+{
+  "name": "tanganyika-client",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.15.0",
+    "axios": "^1.4.0",
+    "jspdf": "^2.5.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.0",
+    "vite": "^5.0.0",
+    "tailwindcss": "^3.4.0",
+    "postcss": "^8.4.0",
+    "autoprefixer": "^10.4.0"
+  }
+}
+JSON
+
+########################
+# CLIENT: vite config, tailwind, index.html
+########################
+cat > "$PROJECT_DIR/client/vite.config.js" <<'JS'
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+export default defineConfig({
+  plugins: [react()]
+})
+JS
+
+cat > "$PROJECT_DIR/client/tailwind.config.js" <<'JS'
+export default {
+  content: ['./index.html', './src/**/*.{js,jsx}'],
+  theme: { extend: {} },
+  plugins: [],
+}
+JS
+
+cat > "$PROJECT_DIR/client/index.html" <<'HTML'
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>Tanganyika Travelers Portal</title>
+  </head>
+  <body class="bg-gray-100">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+HTML
+
+########################
+# CLIENT src files
+########################
+cat > "$PROJECT_DIR/client/src/main.jsx" <<'JS'
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App.jsx';
+import './index.css';
+createRoot(document.getElementById('root')).render(<App />);
+JS
+
+cat > "$PROJECT_DIR/client/src/index.css" <<'CSS'
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body { background-color: #f0fdf4; }
+CSS
+
+cat > "$PROJECT_DIR/client/src/App.jsx" <<'JS'
+import React, { useEffect, useState } from 'react';
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
+import axios from 'axios';
+import { jsPDF } from 'jspdf';
+
+const api = axios.create({ baseURL: 'http://localhost:4000/api' });
+
+function Header() {
+  return (
+    <nav className="flex flex-wrap gap-4 p-4 bg-green-600 text-white">
+      <Link to="/">Home</Link>
+      <Link to="/destinations">Destinations</Link>
+      <Link to="/transports">Transport</Link>
+      <Link to="/operators">Operators</Link>
+      <Link to="/booking">Booking</Link>
+    </nav>
+  );
+}
+
+function Footer() { return <footer className="bg-gray-800 text-white p-4 text-center mt-6">Tanganyika Travelers Portal © 2025</footer>; }
+
+function Home() {
+  return (
+    <div className="p-6">
+      <Header />
+      <div className="text-center mt-8">
+        <h1 className="text-4xl font-bold text-green-700">Karibu Tanganyika Travelers Portal</h1>
+        <p className="mt-4 text-gray-700">Discover top destinations and book your trip.</p>
+      </div>
+      <Footer />
+    </div>
+  );
+}
+
+function Destinations() {
+  const [data, setData] = useState([]);
+  useEffect(()=>{ api.get('/destinations').then(r=>setData(r.data)); },[]);
+  return (
+    <div className="p-6">
+      <Header />
+      <h2 className="text-2xl font-bold mb-4">Destinations</h2>
+      <div className="grid md:grid-cols-2 gap-4">
+        {data.map(d=>(
+          <div key={d.id} className="bg-white p-4 rounded shadow">
+            <h3 className="font-semibold">{d.name}</h3>
+            <p className="text-sm">{d.description}</p>
+          </div>
+        ))}
+      </div>
+      <Footer />
+    </div>
+  );
+}
+
+function Transports() {
+  const [data, setData] = useState([]);
+  useEffect(()=>{ api.get('/transports').then(r=>setData(r.data)); },[]);
+  return (
+    <div className="p-6">
+      <Header />
+      <h2 className="text-2xl font-bold mb-4">Transports</h2>
+      <div className="grid md:grid-cols-2 gap-4">
+        {data.map(t=>(
+          <div key={t.id} className="bg-white p-4 rounded shadow">
+            <h3 className="font-semibold">{t.type}: {t.name}</h3>
+            <p>Route: {t.route}</p>
+            <p>Price: ${t.price}</p>
+          </div>
+        ))}
+      </div>
+      <Footer />
+    </div>
+  );
+}
+
+function Operators() {
+  const [data, setData] = useState([]);
+  useEffect(()=>{ api.get('/operators').then(r=>setData(r.data)); },[]);
+  return (
+    <div className="p-6">
+      <Header />
+      <h2 className="text-2xl font-bold mb-4">Operators</h2>
+      <div className="grid md:grid-cols-2 gap-4">
+        {data.map(o=>(
+          <div key={o.id} className="bg-white p-4 rounded shadow">
+            <h3 className="font-semibold">{o.name}</h3>
+            <p>Contact: {o.phone} | {o.email}</p>
+            <p>Fee: ${o.fee}</p>
+          </div>
+        ))}
+      </div>
+      <Footer />
+    </div>
+  );
+}
+
+function Booking() {
+  const [destinations, setDestinations] = useState([]);
+  const [transports, setTransports] = useState([]);
+  const [form, setForm] = useState({
+    name: '', destination: '', transport: '', days:1, travelers:1, type:'tourism', insurance:false
+  });
+  const [itinerary, setItinerary] = useState(null);
+
+  useEffect(()=>{ api.get('/destinations').then(r=>setDestinations(r.data)); api.get('/transports').then(r=>setTransports(r.data)); },[]);
+
+  const submit = async () => {
+    if(!form.name || !form.destination || !form.transport) return alert('Fill required fields');
+    try {
+      const res = await api.post('/bookings', form);
+      setItinerary(res.data.itinerary);
+    } catch (err) {
+      alert('Booking failed');
+    }
+  };
+
+  const downloadPDF = () => {
+    if(!itinerary) return;
+    const doc = new jsPDF();
+    doc.setFontSize(16);
+    doc.text('Tanganyika Itinerary', 10, 10);
+    doc.setFontSize(12);
+    doc.text(`Name: ${itinerary.name}`, 10, 20);
+    doc.text(`Destination: ${itinerary.destination}`, 10, 30);
+    doc.text(`Transport: ${itinerary.transport}`, 10, 40);
+    doc.text(`Days: ${itinerary.days}`, 10, 50);
+    doc.text(`Travelers: ${itinerary.travelers}`, 10, 60);
+    doc.text(`Insurance: $${itinerary.insuranceCost}`, 10, 70);
+    doc.text(`Transport Cost: $${itinerary.transportCost}`, 10, 80);
+    doc.text(`Total: $${itinerary.total}`, 10, 90);
+    doc.text('Activities:', 10, 100);
+    itinerary.activities.forEach((a,i)=>doc.text(`${i+1}. ${a}`, 10, 110 + i*8));
+    doc.save('itinerary.pdf');
+  };
+
+  return (
+    <div className="p-6">
+      <Header />
+      <div className="max-w-md mx-auto bg-white p-4 rounded shadow">
+        <h2 className="text-xl font-bold mb-2">Book Your Trip</h2>
+        <input className="border p-2 w-full mb-2" placeholder="Your Name" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} />
+        <select className="border p-2 w-full mb-2" value={form.destination} onChange={e=>setForm({...form,destination:e.target.value})}>
+          <option value="">Choose Destination</option>
+          {destinations.map(d=><option key={d.id} value={d.name}>{d.name}</option>)}
+        </select>
+        <select className="border p-2 w-full mb-2" value={form.transport} onChange={e=>setForm({...form,transport:e.target.value})}>
+          <option value="">Choose Transport</option>
+          {transports.map(t=><option key={t.id} value={t.name}>{t.type}: {t.name} (${t.price})</option>)}
+        </select>
+        <input type="number" min="1" className="border p-2 w-full mb-2" value={form.days} onChange={e=>setForm({...form,days:parseInt(e.target.value)})} />
+        <input type="number" min="1" className="border p-2 w-full mb-2" value={form.travelers} onChange={e=>setForm({...form,travelers:parseInt(e.target.value)})} />
+        <select className="border p-2 w-full mb-2" value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
+          <option value="tourism">Tourism</option>
+          <option value="vacation">Vacation</option>
+          <option value="business">Business</option>
+        </select>
+        <div className="flex items-center mb-2">
+          <input type="checkbox" checked={form.insurance} onChange={e=>setForm({...form,insurance:e.target.checked})} />
+          <span className="ml-2">Traveler Insurance ($20 per traveler)</span>
+        </div>
+        <button className="bg-blue-600 text-white p-2 w-full" onClick={submit}>Confirm Booking</button>
+
+        {itinerary && (
+          <div className="mt-4 p-2 border rounded bg-gray-50">
+            <h3 className="font-bold">Your Itinerary</h3>
+            <p><strong>Destination:</strong> {itinerary.destination}</p>
+            <p><strong>Transport:</strong> {itinerary.transport}</p>
+            <p><strong>Days:</strong> {itinerary.days}</p>
+            <p><strong>Travelers:</strong> {itinerary.travelers}</p>
+            <p><strong>Total:</strong> ${itinerary.total}</p>
+            <ul className="list-disc ml-6">
+              {itinerary.activities.map((a,i)=><li key={i}>{a}</li>)}
+            </ul>
+            <button className="mt-2 bg-green-600 text-white p-2 w-full" onClick={downloadPDF}>Download PDF</button>
+          </div>
+        )}
+      </div>
+      <Footer />
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/destinations" element={<Destinations/>} />
+        <Route path="/transports" element={<Transports/>} />
+        <Route path="/operators" element={<Operators/>} />
+        <Route path="/booking" element={<Booking/>} />
+      </Routes>
+    </Router>
+  );
+}
+JS
+
+########################
+# README
+########################
+cat > "$PROJECT_DIR/README.md" <<'MD'
+Tanganyika Fullstack Portal
+
+## Server (Express + SQLite)
+cd server
+npm install
+npm start
+
+Server runs on http://localhost:4000
+
+## Client (React + Vite)
+cd client
+npm install
+npm run dev
+
+Client runs on http://localhost:5173
+MD
+
+echo
+echo "All files created under ./$PROJECT_DIR"
+echo
+echo "NEXT STEPS (run these in two terminals):"
+echo
+echo "1) Start server"
+echo "   cd $PROJECT_DIR/server"
+echo "   npm install"
+echo "   npm start"
+echo
+echo "2) Start client"
+echo "   cd $PROJECT_DIR/client"
+echo "   npm install"
+echo "   npm run dev"
+echo
+echo "Then open the browser at the URL Vite shows (default http://localhost:5173)."
+echo
+echo "If you are on Windows (PowerShell) and prefer a script, let me know and I'll provide a PowerShell version."
+echo
+echo "Done."
